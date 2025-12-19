@@ -1,6 +1,6 @@
 #
-# Calculate FIFO profits on a LibreOffice calc with 
-# buys and sells in rows. 
+# Calculate FIFO profits on a LibreOffice calc with
+# buys and sells in rows.
 # See FIFOStockSellProfitCalculator() comments for columns' values.
 #
 # by circulosmeos, 2017-04, 2017-11, 2017-12, 2018-04
@@ -10,7 +10,7 @@
 #
 
 import sys
-import socket  # only needed on win32-OOo3.0.0
+import socket # only needed on win32-OOo3.0.0
 import uno
 from collections import deque
 from decimal import *
@@ -47,23 +47,31 @@ def FIFOStockSellProfitCalculator(*args):
     # regional comma separator:
     # DECIMAL_POINT is substitued by PYTHON_DECIMAL_POINT, just in case a regional configuration
     # be different from the standard decimal point '.'
-    DECIMAL_POINT = '.' # change this to your regional configuration
+    DECIMAL_POINT = ',' # change this to your regional configuration
     PYTHON_DECIMAL_POINT = '.'
 
-    # column and value strings definitions:
-    BEGINNING_OF_DATA = 2   # first row with data
-    ASSET       = 'C'       # Unique asset id (i.e. USD, EUR, STCKXXXX, etc)
-    TYPE        = 'E'       # SELL | BUY | other
-    SELL        = 'sell'    # sell string identifier on TYPE column
-    BUY         = 'buy'     # buy  string identifier on TYPE column
-    PRICE       = 'G'
-    FEE         = 'I'
-    VOLUME      = 'J'
-    PROFIT      = 'T'       # column of results
-    PROFIT_DESC = 'U'       # here the ASSET id will be repeated
-    ASSETS_VOL  = 'V'       # volume of assets of type ASSET after each buy/sell op
-    BUY_TO_FIAT = 'W'       # volume of fiat currency (or origin asset) invested in the buy(s) now sold
-    BUYS_TO_FIAT_VOLUME = 'A'   # volume of fiat currency (or origin asset) accumulated
+    # if enabled add headers in first row of columns with output
+    ADD_HEADERS = 1
+
+    # column idx and value strings definitions:
+    DATA_TAB_IDX = 1        # spreadsheet tab in which calculations should be done (indexed from 0)
+    BEGINNING_OF_DATA = 2   # first row with data in the spreadsheet
+    ASSET       = 'B'       # column name for Unique asset id (i.e. USD, EUR, STCKXXXX, etc)
+    TYPE        = 'D'       # column name for operation type (BUY/SELL)
+    SELL        = 'SELL'    # sell string identifier used in operation TYPE column
+    BUY         = 'BUY'     # buy string identifier used in operation TYPE column
+    PRICE       = 'G'       # column name for unit price
+    FEE         = 'L'       # column name for operation fee for broker
+    VOLUME      = 'E'       # units volume bought/sold
+    # results - filled in by the script
+    # PROFIT_DESC = 'S'     # column where the ASSET id will be repeated for more clarity
+
+    BUY_TO_FIAT = 'M'       # column for volume of fiat currency (or origin asset) invested in the buy(s) now sold
+    SOLD_VAL    = 'N'       # column for the income from selling the asset volume
+    PROFIT      = 'O'       # column for fill in the results
+    ASSETS_VOL  = 'P'       # column for volume of assets of type ASSET after each buy/sell op
+
+    BUYS_TO_FIAT_VOLUME = 'S'   # volume of fiat currency (or origin asset) accumulated
                                 # in buys of assets sold again to fiat currency (or origin asset)
                                 # This column will be used in a row after the end of rows of data,
                                 # in which a resume of all origin/dest assets will presented.
@@ -79,7 +87,6 @@ def FIFOStockSellProfitCalculator(*args):
     LOG = 0
 
     # .................................................
-
     getcontext().prec = DECIMAL_NUMBER_PRECISION
 
     # .................................................
@@ -91,8 +98,7 @@ def FIFOStockSellProfitCalculator(*args):
         # get the uno component context from the PyUNO runtime
         localContext = uno.getComponentContext()
         # create the UnoUrlResolver
-        resolver = localContext.ServiceManager.createInstanceWithContext(
-                        "com.sun.star.bridge.UnoUrlResolver", localContext )
+        resolver = localContext.ServiceManager.createInstanceWithContext("com.sun.star.bridge.UnoUrlResolver", localContext)
         ctx = resolver.resolve( "uno:socket,host=localhost,port=2002;urp;StarOffice.ComponentContext" )
         smgr = ctx.ServiceManager
         # get the central desktop object
@@ -110,13 +116,20 @@ def FIFOStockSellProfitCalculator(*args):
     # check whether there's already an opened document. Otherwise, die
     if not hasattr(model, "Sheets"):
         sys.exit()
-    # get the XText interface
-    sheet = model.Sheets.getByIndex(0)
+    # get the XText interface, indexed from 0
+    sheet = model.Sheets.getByIndex(DATA_TAB_IDX)
 
-    # calculate length of data
+    if ADD_HEADERS==1:
+      if BEGINNING_OF_DATA > 1:
+        sheet.getCellRangeByName(BUY_TO_FIAT + str(1)).String = 'BOUGHT_BY'
+        sheet.getCellRangeByName(SOLD_VAL + str(1)).String = 'SOLD'
+        sheet.getCellRangeByName(PROFIT + str(1)).String = 'PROFIT'
+        sheet.getCellRangeByName(ASSETS_VOL + str(1)).String = 'ASSETS_VOL'
+
+    # calculate length of data - number of rows to calculate
     # taking into account that data starts at BEGINNING_OF_DATA
     END_OF_DATA = BEGINNING_OF_DATA
-    while (sheet.getCellRangeByName(TYPE + str(END_OF_DATA))).String != '' :
+    while (sheet.getCellRangeByName(TYPE + str(END_OF_DATA))).String != '':
         END_OF_DATA+=1
 
     # data array with buys is a dictionary of deque's (implements popleft())
@@ -140,26 +153,30 @@ def FIFOStockSellProfitCalculator(*args):
         # buy:
         # buys are accumulated one after another until a sell arrives
         if ( sheet.getCellRangeByName(TYPE + str(i)).String == BUY ):
-            if LOG==1: print("buy  " + str(i))
+            if LOG==1: print("A:" + asset + " BUY, row: " + str(i) + "\t" +
+                "[ price: " + sheet.getCellRangeByName(PRICE + str(i)).String + ", vol: " + 
+                      sheet.getCellRangeByName(VOLUME + str(i)).String + "] \t")
             # Buy = [ price, quantity ]
             fifo.append( 
-                [ Decimal(sheet.getCellRangeByName(PRICE  + str(i)).String.replace(DECIMAL_POINT,PYTHON_DECIMAL_POINT)), 
-                  Decimal(sheet.getCellRangeByName(VOLUME + str(i)).String.replace(DECIMAL_POINT,PYTHON_DECIMAL_POINT)) 
+                [ Decimal(sheet.getCellRangeByName(PRICE  + str(i)).String.replace(DECIMAL_POINT,PYTHON_DECIMAL_POINT)),
+                  Decimal(sheet.getCellRangeByName(VOLUME + str(i)).String.replace(DECIMAL_POINT,PYTHON_DECIMAL_POINT))
                 ] )
             # also show the assets' volume after this buy
-            sheet.getCellRangeByName(PROFIT_DESC + str(i)).String = asset
+            # temporarly removed
+            # sheet.getCellRangeByName(PROFIT_DESC + str(i)).String = asset
             assets_remaining = Decimal('0')
             for buys in fifo:
                 assets_remaining+=buys[1]
-            sheet.getCellRangeByName(ASSETS_VOL + str(i)).Value = float(assets_remaining)            
+            sheet.getCellRangeByName(ASSETS_VOL + str(i)).Value = float(assets_remaining)
         # sell:
         elif ( sheet.getCellRangeByName(TYPE + str(i)).String == SELL ):
             # first, some logs
-            if LOG==1: print("sell " + str(i) + "\t" +
-                "[" + sheet.getCellRangeByName(PRICE + str(i)).String + ", " + 
-                    sheet.getCellRangeByName(VOLUME  + str(i)).String + "] \t" + asset
-                )
-            if LOG==1: print(fifo)
+            if LOG==1: print("A:" + asset + " SELL, row: " + str(i) + "\t" +
+                "[ price: " + sheet.getCellRangeByName(PRICE + str(i)).String + ", vol: " + 
+                      sheet.getCellRangeByName(VOLUME + str(i)).String + "] \t")
+            if LOG==1: 
+                print("A: " + asset +" fifo dump: ")
+                print(fifo)
 
             quantity    = Decimal(sheet.getCellRangeByName(VOLUME + str(i)).String.replace(DECIMAL_POINT,PYTHON_DECIMAL_POINT))
             accumulator = Decimal('0')
@@ -213,14 +230,18 @@ def FIFOStockSellProfitCalculator(*args):
                     # now calculate "buy value" with medium costs:
                     accumulator = quantity * ( total_accumulator / total_quantity )
 
+            sold_tmp = Decimal(sheet.getCellRangeByName(VOLUME + str(i)).String.replace(DECIMAL_POINT,PYTHON_DECIMAL_POINT)) * Decimal(sheet.getCellRangeByName(PRICE  + str(i)).String.replace(DECIMAL_POINT,PYTHON_DECIMAL_POINT))
+
+            profit_tmp = sold_tmp - accumulator
+            if LOG==1: print("Sold by: " + str(sold_tmp) + " bought with: " + str(accumulator) + " profit: " + str(profit_tmp))
+
+            # write the income from selling the asset
+            sheet.getCellRangeByName(SOLD_VAL + str(i)).Value = float(sold_tmp)
             # sell "buy value" has been calculated in accumulator variable
             # let's write the profit:
-            sheet.getCellRangeByName(PROFIT + str(i)).Value = float ( 
-                Decimal(sheet.getCellRangeByName(VOLUME + str(i)).String.replace(DECIMAL_POINT,PYTHON_DECIMAL_POINT)) * 
-                Decimal(sheet.getCellRangeByName(PRICE  + str(i)).String.replace(DECIMAL_POINT,PYTHON_DECIMAL_POINT)) - 
-                accumulator
-                )
-            sheet.getCellRangeByName(PROFIT_DESC + str(i)).String = asset
+            sheet.getCellRangeByName(PROFIT + str(i)).Value = float(profit_tmp)
+            # temporarly removed
+            # sheet.getCellRangeByName(PROFIT_DESC + str(i)).String = asset
 
             # also show the remaining assets' volume
             assets_remaining = Decimal('0')
@@ -228,11 +249,11 @@ def FIFOStockSellProfitCalculator(*args):
                 assets_remaining+=buys[1]
             sheet.getCellRangeByName(ASSETS_VOL + str(i)).Value = float(assets_remaining)
             if LOG==1: print(fifo)
-            if LOG==1: print(PROFIT + str(i) + "=\t" + sheet.getCellRangeByName(PROFIT + str(i)).String)
+            if LOG==1: print("A:" + asset + " profit: " + PROFIT + str(i) + "=\t" + sheet.getCellRangeByName(PROFIT + str(i)).String)
 
             # show the volume of fiat currency (or origin asset) invested in the buy(s) now sold
             sheet.getCellRangeByName(BUY_TO_FIAT + str(i)).Value = float(accumulator)
-            if LOG==1: print(BUY_TO_FIAT + str(i) + "=\t" + sheet.getCellRangeByName(BUY_TO_FIAT + str(i)).String)
+            if LOG==1: print("A:" + asset + " bought now sold: " + BUY_TO_FIAT + str(i) + "=\t" + sheet.getCellRangeByName(BUY_TO_FIAT + str(i)).String)
 
             # (for BUYS_TO_FIAT_VOLUME): Accumulate buy(s) value spent in this asset sell
             if ( buys_to_fiat_volume.get(asset) == None ):
@@ -250,6 +271,13 @@ def FIFOStockSellProfitCalculator(*args):
                 changes_in_type_of_calculation.popleft()
                 if LOG==1: print("\nTYPE_OF_CALCULATION = " + str(TYPE_OF_CALCULATION) + "\n")
 
+    # write sum of money invested in sold assets
+    sheet.getCellRangeByName(BUY_TO_FIAT + str(END_OF_DATA)).Formula = \
+        '=SUM(' + str(BUY_TO_FIAT) + str(BEGINNING_OF_DATA) + ':' + str(BUY_TO_FIAT) + str(END_OF_DATA-1) + ')'
+    # write sum of income from selling the assets
+    sheet.getCellRangeByName(SOLD_VAL + str(END_OF_DATA)).Formula = \
+        '=SUM(' + str(SOLD_VAL) + str(BEGINNING_OF_DATA) + ':' + str(SOLD_VAL) + str(END_OF_DATA-1) + ')'
+
     # write sum of gross profits
     sheet.getCellRangeByName(PROFIT + str(END_OF_DATA)).Formula = \
         '=SUM(' + str(PROFIT) + str(BEGINNING_OF_DATA) + ':' + str(PROFIT) + str(END_OF_DATA-1) + ')'
@@ -263,7 +291,7 @@ def FIFOStockSellProfitCalculator(*args):
     # write sum of net profits
     sheet.getCellRangeByName(PROFIT + str(END_OF_DATA+1)).Formula = \
         '=' + str(PROFIT) + str(END_OF_DATA) + '-' + str(FEE) + str(END_OF_DATA)
-    sheet.getCellByPosition(ord(PROFIT)-ord('A')+1, END_OF_DATA-1+1).String = 'Net profit'
+    sheet.getCellByPosition(ord(PROFIT)-ord('A')+1, END_OF_DATA-1+1).String = 'Net profit (minus fees)'
 
     # (for BUYS_TO_FIAT_VOLUME):
     # write resume of the volume of fiat currency (or origin asset) accumulated
